@@ -178,10 +178,13 @@ def _eval_probe(sess, spec, timeout):
             looks_like_portal = (bool(d.location)
                                  or "<html" in body.lower()
                                  or len(body) > 1024)
-            d.ok = r.status_code in (200, 204) and not looks_like_portal
+            d.ok = bool(r.status_code in (200, 204) and not looks_like_portal)
         else:
-            d.ok = (r.status_code == want_code
-                    and (want_re is None or re.search(want_re, body)))
+            # bool(...) 不能省：re.search 命中时返回的是 Match 对象，
+            # 直接赋值会让 d.ok 变成 Match（真值判断虽然对，但日志里会打出
+            # <re.Match object ...> 这种莫名其妙的内容）。
+            d.ok = bool(r.status_code == want_code
+                        and (want_re is None or re.search(want_re, body)))
     except requests.exceptions.RequestException as e:
         d.error = f"{type(e).__name__}"
     return d, body

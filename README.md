@@ -29,6 +29,7 @@
 - [9. 排障](#9-排障)
 - [10. 安全说明](#10-安全说明)
 - [11. 验证状态](#11-验证状态)
+- [12. 打包成 exe](#12-打包成-exe)
 
 ---
 
@@ -102,7 +103,11 @@ campus-net-autologin/
 ├─ config.ini                    你的实际配置（setup 生成；**已被 .gitignore 排除**）
 ├─ .gitignore                    确保账号与日志永不进仓库
 ├─ campusnet.cmd                 便捷启动器（自动挑可用 Python，绕开商店占位符）
-├─ run_login.py                  开机自启入口（任务计划程序调用）
+├─ campusnet_gui.py              ★ exe 入口：双击开图形界面，带参数走静默模式
+├─ build.spec                    PyInstaller 打包定义（含 keyring 隐式依赖）
+├─ build.bat                     一键打包脚本（ASCII-only，避免 cmd 编码坑）
+├─ 使用说明.txt                    打包后在发布文件夹里给同学看的中文说明
+├─ run_login.py                  开机自启入口（源码方式运行，任务计划程序调用）
 ├─ run_guard.py                  巡检守护入口（每 5 分钟检查一次）
 ├─ setup_autostart.ps1           安装开机自启（当前用户级，无需管理员）
 ├─ remove_autostart.ps1          卸载开机自启
@@ -632,3 +637,125 @@ Get-ScheduledTask -TaskName CampusNet* -ErrorAction SilentlyContinue
    借返回码区分"路径不对（404）"和"字段/令牌不对（400/403）"；
 5. 用本地模拟 Portal（`tests/mock_portal.py`）搭一套端到端回归，
    把链路抖动、令牌失效等异常都变成可重复的测试用例。
+
+---
+
+## 12. 打包成 exe
+
+目标是发给**没装 Python** 的同学，双击即用。
+
+### 12.1 三个看起来可行、实际会翻车的做法
+
+| 想法 | 为什么不行 |
+|---|---|
+| 打包 `run_login.py` + `--noconsole` | `run_login.py` 是**一次性静默任务**，它假定密码已经在凭据管理器里。同学第一次双击时密码还不存在，它会直接失败——而 `--noconsole` 下**连错误都看不见**，表现就是"双击后毫无反应" |
+| 加 `--uac-admin` 请求管理员 | 本项目的自启任务是 `RunLevel=Limited`（故意不要管理员）。带 `requireAdministrator` 清单的 exe **无法被这种任务在登录时静默拉起**，开机自启会直接坏掉。而且 keyring 与用户级任务本来就不需要管理员（已实测） |
+| `config.ini` 打进 exe 内部 | 打包后 `__file__` 指向临时解压目录 `_MEIPASS`，往里写的配置会在进程退出时被清掉 |
+
+### 12.2 正确方案：一个 exe，双模式
+
+`campusnet_gui.py` 按命令行参数分流，所以只发**一个文件**，自启又不弹窗口：
+
+| 调用方式 | 行为 |
+|---|---|
+| 双击（无参数） | 打开图形界面 |
+| `CampusNet.exe --login` | 静默登录一次（任务计划程序调用，**不闪黑框**） |
+| `CampusNet.exe --guard` | 静默常驻巡检 |
+| `CampusNet.exe --diagnose` | 环境信息写入日志，用于远程排障 |
+| `CampusNet.exe --install` / `--uninstall` | 命令行安装 / 卸载自启 |
+
+### 12.3 打包命令
+
+一键（推荐）：
+
+```powershell
+.\build.bat
+```
+
+它会自动找 Python、补装依赖、执行 PyInstaller、组装发布文件夹。
+
+手动等价命令：
+
+```powershell
+python -m pip install pyinstaller
+python -m PyInstaller --noconfirm --clean build.spec
+```
+
+> ⚠️ 不要直接 `pyinstaller campusnet_gui.py`：那样会漏掉 keyring 的隐式依赖（见 12.4）。
+
+产物（实测 exe 为 **14.17 MB**）：
+
+```
+dist\CampusNet.exe              单文件程序
+dist\CampusNet\                 可以直接压缩发给同学的文件夹
+├─ CampusNet.exe
+├─ config.ini                   外置配置，同学可自行编辑（里面没有密码）
+├─ LICENSE.txt
+└─ 使用说明.txt
+```
+
+### 12.4 keyring 的隐式依赖（最容易漏的一环）
+
+`keyring` 的后端是通过包元数据里的 **entry points 动态加载**的，PyInstaller 静态分析看不到。
+漏了它，运行时会报：
+
+```
+keyring.errors.NoKeyringError: No recommended backend was available
+```
+
+`build.spec` 已经处理了三层：
+
+```python
+hiddenimports = [
+    "keyring.backends.Windows",     # Windows 上真正生效的后端
+    "keyring.backends.fail",
+    "keyring.backends.chainer",
+    "win32ctypes.pywin32",          # Windows 后端的底层依赖
+    "win32ctypes.core",
+    "jaraco.classes", "jaraco.functools", "jaraco.context",
+    "more_itertools",
+]
+hiddenimports += collect_submodules("keyring")      # 兜底：整个包都收进来
+datas = copy_metadata("keyring") + copy_metadata("requests")   # entry points 在 dist-info 里
+```
+
+**实测验证**：打包后 `--diagnose` 日志显示 `凭据后端 : WinVaultKeyring`，说明后端被正确加载。
+
+### 12.5 config.ini 外置是怎么做到的
+
+`campusnet/config.py` 里加了 frozen 感知：
+
+```python
+def app_dir() -> Path:
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent   # exe 所在目录
+    return Path(__file__).resolve().parent.parent
+```
+
+**实测验证**（exe 内日志）：
+
+```
+程序目录 : C:\...\cntest4
+配置文件 : C:\...\cntest4\config.ini  (存在=True)
+_MEIPASS : C:\...\_MEI00000d902        ← 证明不是从解压目录读的
+```
+
+### 12.6 关于 --uac-admin
+
+默认**不加**。确实需要时（例如要装进 `C:\Program Files`）：把 `build.spec` 里
+`uac_admin=False` 改成 `True`，**同时**必须把自启任务改成"使用最高权限运行"，
+否则开机自启会失效。
+
+### 12.7 分发建议
+
+把 `dist\CampusNet\` 整个文件夹压缩成 zip 发出去。想在 GitHub 上分享二进制，
+用 **Releases**，不要把 exe 提交进仓库（`.gitignore` 已排除 `dist/` 与 `build/`）：
+
+```powershell
+Compress-Archive -Path dist\CampusNet -DestinationPath dist\CampusNet-v1.1.0.zip -Force
+gh release create v1.1.0 dist\CampusNet-v1.1.0.zip --title "v1.1.0" --notes "首个可执行版本"
+```
+
+> Windows 安全中心可能拦截"没有数字签名的 exe"，让同学在
+> 「病毒和威胁防护 → 保护历史记录」里允许一次即可。代码签名证书要几百到几千一年，
+> 个人项目通常不做。

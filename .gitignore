@@ -39,3 +39,6 @@ ENV/
 Thumbs.db
 desktop.ini
 .DS_Store
+
+# PyInstaller 自动生成的临时 spec（build.spec 是手写的，要保留）
+/CampusNetDebug.spec

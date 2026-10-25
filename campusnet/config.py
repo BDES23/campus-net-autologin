@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import configparser
 import os
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -115,11 +116,23 @@ class Config:
         return [s.strip() for s in raw.split(",") if s.strip()]
 
 
+def app_dir() -> Path:
+    """程序所在目录（exe 打包后要读写的那个目录）。
+
+    打包成 exe 后**必须**用 exe 自身的位置，不能用 __file__：
+    PyInstaller 单文件模式会把代码解压到临时目录（sys._MEIPASS），
+    __file__ 指向那里，往里写 config.ini / logs 会在进程退出时被清掉。
+    """
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent.parent
+
+
 def default_config_path() -> Path:
     env = os.environ.get("CAMPUSNET_CONFIG")
     if env:
         return Path(env)
-    return Path(__file__).resolve().parent.parent / "config.ini"
+    return app_dir() / "config.ini"
 
 
 def load(path: Path | str | None = None) -> Config:
